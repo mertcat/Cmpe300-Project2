@@ -223,9 +223,152 @@ def worker_pattern_2(args):
         comm.send(dict(final_tf), dest=0, tag=TAG_RESULT)
 
 
+# Pattern 3 manager
+def manager_pattern_3(args):
+    all_sentences = load_text(args.text)
+    #vocabulary = load_words(args.vocab)
+    #stopwords = load_words(args.stopwords)
+
+    num_workers = size - 1              # -1 to exclude manager.
+    num_pipelines = num_workers // 4    # Pipelines have 4 workers.
+
+    pipeline_partitions = []                        # Stores subset of sentences as a list.
+    partitions_size = len(all_sentences)            # To distribute the sentences to the pipelines.
+    remainder = len(all_sentences) % num_pipelines  # Hold the remainder sentences.
+
+    start_index = 0     # As in manager_pattern_1
+
+    for i in range (num_pipelines):
+        # Calculate the size for the pipeline.
+        # Add 1 if its one of the earlier pipelines, this also depends on wether remainder exists.
+        current_partition_size = partitions_size + (1 if i < remainder else 0)
+
+        # Create the partition itself by slicing the main list
+        individual_partition = all_sentences[start_index : start_index + current_partition_size]
+        pipeline_partitions.append(individual_partition)
+
+        # Increment start_index to create the next pipeline.
+        start_index += current_partition_size
 
 
+    # Now feed the data to pipelines.
+    # Define constants.
+    CHUNK_SIZE = 10     # Between 5 and 20 as in the project directive.
+    TAG_DATA = 10       # Constant for chunk size.
+    TAG_DONE = 11       # To hold the end for chunk.
 
+    for i in range(num_pipelines):
+        partition = pipeline_partitions[i]
+        
+        # Pipeline 0 starts with worker 1 since manager occupies worker 0.
+        # So rank = pipelineID * 4 + 1
+        start_rank = (i * 4) + 1
+
+        # Iterate through the pipeline incrementing by the CHUNK_SIZE
+        for j in range(0, len(partition), CHUNK_SIZE):
+            chunk = partition[j : j + CHUNK_SIZE]
+
+            # Send this chunk to the worker
+            comm.send(chunk, dest = start_rank, tag = TAG_DATA)
+
+        # After sending all the text, send done signal
+        comm.send(None, dest = start_rank, tag = TAG_DONE)
+
+
+    # Now we collect the results
+    final_term_frequency_results = defaultdict(int)
+    TAG_RESULT = 12
+
+    for i in range(num_pipelines):
+        # Last worker holds the counts. Get this workers rank.
+        last_rank = (i * 4) + 4
+
+        # Pause until all messages are received.
+        partial_term_frequency = comm.recv(source = last_rank, tag = TAG_RESULT)
+
+        # Merge them into the final_term_frequency_results
+        for word, count in partial_term_frequency.items():
+            # Adds the word frequencies on top of each other to get the total number of occurences.
+            final_term_frequency_results[word] += count
+
+    sorted_results = sorted(final_term_frequency_results.items())
+    for w, c in sorted_results:
+        print(f"{w}: {c}")
+
+
+def worker_pattern_3(args):
+    worker_index = rank - 1             # Shift ranks to 0 based.
+    stage_id = worker_index % 4         # Designates the pipeline stage 0 to 3, since this is a 4 stage pipeline.
+
+    # Now get the upstream and downstream
+    # Upstream -> preceding worker, downstream -> succeeding worker.
+    # We use rank instead of stage_id since rank is the global variable.
+    us_rank = rank - 1
+    # If this is the first pipeline stage upstream is the manager. Handle this exception:
+    if (stage_id == 0):
+        us_rank = 0
+
+    ds_rank = rank + 1
+    # If this is the last pipeline stage downstream is manager.
+    if (stage_id == 3):
+        ds_rank = 0
+
+    # Define constants.
+    TAG_DATA = 10
+    TAG_DONE = 11
+    TAG_RESULT = 12     # These are as manager_pattern_3
+
+    worker_stopwords = []
+    worker_vocab = set()
+    worker_term_frequency_counts = defaultdict(int)
+
+    # Worker 3 (stage 2) needs the stopwords.
+    if (stage_id == 2):
+        worker_stopwords = load_words(args.stopwords)
+    # Worker 4 needs vocabulary to count words
+    elif (stage_id == 3):
+        worker_vocab = load_words(args.vocab)
+
+
+    # Implement processing
+    while True:
+        status = MPI.Status()
+
+        # Wait until source_rank sends data
+        data = comm.recv(source = us_rank, tag = MPI.ANY_TAG, status = status)
+        # Get the tag
+        tag = status.Get_tag()
+
+        # Cover the case TAG_DONE
+        if (tag == TAG_DONE):
+            if (stage_id < 3):
+                # If this is not the last stage pass the done signal to the next stage.
+                comm.send(None, dest = ds_rank, tag = TAG_DONE)
+            else:
+                # If this is the last stage, send the final data to the manager
+                comm.send(dict(worker_term_frequency_counts), dest = 0, tag = TAG_RESULT)
+            break
+
+        # If we are not finished do the data processing, NLP states:
+        processed = None
+
+        if (stage_id == 0):     # Lowercasing
+            processed = lowercase_chunk(data)
+        elif (stage_id == 1):   # Remove punctuation
+            processed = remove_punctuation_chunk(data)
+        elif (stage_id == 2):   # Remove stopwords
+            processed = remove_stopwords_chunk(data, worker_stopwords)
+        elif (stage_id == 3):   # Term freq. counting
+            partial_term_frequency = compute_term_frequency(data, worker_vocab)
+
+            # Add the partial term counts to our local total
+            for w, c in partial_term_frequency.items():
+                worker_term_frequency_counts[w] += c
+            # We dont return anything for this stage of pipeline until the pipeline is finished.
+            continue
+
+        # Pass the data to the next stage in the pipeline. Stage 3 doesnt reach here.
+        comm.send(processed, dest = ds_rank, tag = TAG_DATA)
 
 
 
@@ -267,6 +410,12 @@ def main():
             manager_pattern_2(args)
         else:
             worker_pattern_2(args)
+
+    if args.pattern == 3:
+        if rank == 0:
+            manager_pattern_3(args)
+        else:
+            worker_pattern_3(args)
 
 
 
