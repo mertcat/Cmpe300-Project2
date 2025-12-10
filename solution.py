@@ -1,3 +1,4 @@
+"Mert Özüstün, 2022400192; Ahmet Cem Çalık, 2022400171"
 import sys
 import argparse
 from mpi4py import MPI
