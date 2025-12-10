@@ -50,7 +50,7 @@ def remove_punctuation_chunk(chunk):
             if char not in punc_to_remove:  # determine whether the char is punctuation
                 temp.append(char)
 
-        no_punc = ''.join(temp)
+        no_punc = ''.join(temp)             # rejoining to the string
         processed.append(no_punc)
 
     return processed
@@ -72,6 +72,7 @@ def remove_stopwords_chunk(chunk, stopwords):
 
 # the function calculates the term frequency of the text
 def compute_term_frequency(processed_sentences, vocabulary):
+    # initializing the dictionary
     partial_tf = {word: 0 for word in vocabulary}
 
     # iterating through every word in every sentence
