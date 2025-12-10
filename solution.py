@@ -187,8 +187,13 @@ def manager_pattern_2(args):
         chunk_size = 1
 
     # creating chunks for worker 1
-    chunks = [all_sentences[i:i + chunk_size]
-              for i in range(0, num_sentences, chunk_size)]
+    chunks = []
+    i = 0
+    while i < num_sentences:
+        end_index = i + chunk_size
+        chunk = all_sentences[i:end_index]
+        chunks.append(chunk)
+        i += chunk_size
 
     # all chunks go to worker 1
     for i, chunk in enumerate(chunks):
