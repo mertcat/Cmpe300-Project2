@@ -81,6 +81,20 @@ def compute_term_frequency(processed_sentences, vocabulary):
 
     return dict(partial_tf)
 
+# Document frequency function that calculates how many distinct documents a word appears in
+def compute_document_frequency(processed_sentences, vocabulary):
+    partial_df = {word: 0 for word in vocabulary}
+
+    for sentence in processed_sentences:
+        # Use sets since 1 occurence of a word is enough.
+        word_occurences_set = set(sentence)
+
+
+        for word in word_occurences_set:
+            if word in vocabulary:
+                partial_df[word] += 1
+
+    return dict(partial_df)
 
 # MANAGER PATTERN 1
 def manager_pattern_1(args):
@@ -258,6 +272,10 @@ def worker_pattern_2(args):
         comm.send(dict(final_result), dest=0, tag=12)
 
 
+
+
+
+
 # Pattern 3 manager
 def manager_pattern_3(args):
     all_sentences = load_text(args.text)
@@ -327,10 +345,11 @@ def manager_pattern_3(args):
             final_term_frequency_results[word] += count
 
     sorted_results = sorted(final_term_frequency_results.items())
-    for w, c in sorted_results:
-        print(f"{w}: {c}")
+    for word, count in sorted_results:
+        print(f"{word}: {count}")
 
 
+# Pattern3 worker
 def worker_pattern_3(args):
     worker_index = rank - 1             # Shift ranks to 0 based.
     stage_id = worker_index % 4         # Designates the pipeline stage 0 to 3, since this is a 4 stage pipeline.
@@ -409,6 +428,137 @@ def worker_pattern_3(args):
 
 
 
+# Pattern 4 manager
+def manager_pattern_4(args):
+    # Sending their jobs the workers is same as manager_pattern_1
+    all_sentences = load_text(args.text)
+    vocabulary = load_words(args.vocab)
+    stopwords = load_words(args.stopwords)
+
+    num_sentences = len(all_sentences)
+    num_workers = size - 1
+
+    base_size = num_sentences // num_workers
+    remainder = num_sentences % num_workers
+
+    chunks = []
+    start_index = 0
+    
+    for i in range(num_workers):
+        chunk_size = base_size + (1 if i < remainder else 0)
+        end_index = start_index + chunk_size
+        chunk = all_sentences[start_index:end_index]
+        chunks.append(chunk)
+        start_index = end_index
+
+    for worker_rank in range(1, size):
+        data_to_send = {
+            'sentences': chunks[worker_rank - 1],
+            'vocabulary': vocabulary,
+            'stopwords': stopwords
+        }
+        comm.send(data_to_send, dest=worker_rank, tag=1)
+    # Sending is finished.
+
+
+    # Result Receiving
+    
+    # Two seperate results for term frequency and document frequency.
+    final_tf_results = defaultdict(int)
+    final_df_results = defaultdict(int)
+    TAG_RESULT = 2
+
+    # Iterate through all the workers.
+    for worker_rank in range(1, size):
+        # Receive the result dictionary from the worker
+        partial_result = comm.recv(source=worker_rank, tag=TAG_RESULT)
+
+        # If the rank is odd the worker will return term frequency.
+        # If the rank is even the worker will return dictionary frequency, as in project description.
+        if worker_rank % 2 == 1: 
+            # Odd worker
+            for word, count in partial_result.items():
+                final_tf_results[word] += count
+        else:
+            # Even worker
+            for word, count in partial_result.items():
+                final_df_results[word] += count
+
+    # Print to the terminal
+    print("Term-Frequency Results:")
+    sorted_tf = sorted(final_tf_results.items())
+    for word, count in sorted_tf:
+        print(f"{word}: {count}")
+
+    print("\nDocument-Frequency Results:")
+    sorted_df = sorted(final_df_results.items())
+    for word, count in sorted_df:
+        print(f"{word}: {count}")
+    
+
+def worker_pattern_4(args):
+    # Preprocessing
+
+    # Preprocessing is same as worker_pattern_1.
+    data_received = comm.recv(source = 0, tag = 1)
+    
+    sentences = data_received['sentences']
+    vocabulary = data_received['vocabulary']
+    stopwords = data_received['stopwords']
+
+    processed_data = lowercase_chunk(sentences)
+    processed_data = remove_punctuation_chunk(processed_data)
+    processed_data = remove_stopwords_chunk(processed_data, stopwords)
+
+
+    # Pair Communication
+
+    # Find the pair for THIS worker.
+    # If odd:
+    if rank % 2 == 1:
+        pair_rank = rank + 1  # Odd ranks talk to the next worker
+    # If even
+    else:
+        pair_rank = rank - 1  # Even ranks talk to the previous worker
+
+    pair_data = []
+    TAG_SWAP = 55   # Selected arbitrarily
+
+    # Prevent deadlocks in communication between pairs.
+    # Ensured with assymmetric communication patter. Odds send first and evens reviece first.
+    if rank % 2 == 1:
+        # First send
+        comm.send(processed_data, dest = pair_rank, tag = TAG_SWAP)     # Tags are the swapping tag
+        pair_data = comm.recv(source = pair_rank, tag = TAG_SWAP)
+    else:
+        # First recieve
+        pair_data = comm.recv(source = pair_rank, tag = TAG_SWAP)
+        comm.send(processed_data, dest = pair_rank, tag = TAG_SWAP)
+
+    # Combine my data with my pair's data
+    combined_data = processed_data + pair_data
+
+
+    # Task Sharing Between Pairs And Executing
+
+    # Create a result dictionary.
+    result_dict = {}
+    
+    # Pair will execute tf and df as odd and even respectively, in parallel. 
+    if rank % 2 != 0:
+        # Odd -> tf
+        result_dict = compute_term_frequency(combined_data, vocabulary)
+    else:
+        # Even Ranks -> df
+        result_dict = compute_document_frequency(combined_data, vocabulary)
+
+    # Returning The Result to The Manager
+    
+    comm.send(result_dict, dest = 0, tag = 2)   # Tag is the result tag.
+
+
+
+
 
 
 
@@ -452,6 +602,11 @@ def main():
         else:
             worker_pattern_3(args)
 
+    if args.pattern == 4:
+        if rank == 0:
+            manager_pattern_4(args)
+        else:
+            worker_pattern_4(args)
 
 
 if __name__ == '__main__':
