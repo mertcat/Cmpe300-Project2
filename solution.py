@@ -8,35 +8,45 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
+# function which reads the actual text
 def load_text(filepath):
-    with open(filepath, 'r', encoding='utf-8') as f:
-        text = f.read()
     sentences = []
 
-    text = text.replace('!', '.').replace('?', '.').replace(',', '.')
-    for sentence in text.split('.'):
-        clean_s = sentence.strip()
-        if clean_s:
-            sentences.append(clean_s)
+    with open(filepath, 'r', encoding='utf-8') as f:
+        for line in f:
+            stripped_line = line.strip()
+            # adding non-empty line to the sentences list
+            if stripped_line:
+                sentences.append(stripped_line)
+
     return sentences
 
 
+# making a set for vocabulary and stopword
 def load_words(filepath):
+    word_set = set()
     with open(filepath, 'r', encoding='utf-8') as f:
-        return {word.strip().lower() for line in f for word in line.split() if word.strip()}
+        for line in f:
+            word = line.strip()
+            # adding the word (non-empty line) to the words list
+            if word:
+                word_set.add(word)
+    return word_set
 
 
+# lowercase function
 def lowercase_chunk(chunk):
     return [s.lower() for s in chunk]
 
 
+# the function which removes the punctuation
 def remove_punctuation_chunk(chunk):
-    punc_to_remove = string.punctuation
+    punc_to_remove = string.punctuation     # storing the punctuations which should be removed
     processed = []
     for sentence in chunk:
         temp = []
         for char in sentence:
-            if char not in punc_to_remove:
+            if char not in punc_to_remove:  # determine whether the char is punctuation
                 temp.append(char)
 
         no_punc = ''.join(temp)
@@ -45,20 +55,25 @@ def remove_punctuation_chunk(chunk):
     return processed
 
 
-
+# the function which removes the given stopwords from the sentences
 def remove_stopwords_chunk(chunk, stopwords):
     processed = []
     for sentence in chunk:
         words = sentence.split()
-        s_no_stopwords = [word for word in words if word not in stopwords]
+        s_no_stopwords = []
+        for word in words:
+            # check whether the current word is NOT in the stopwords set
+            if word not in stopwords:   # if not in the stopwords list, adding to the sentence
+                s_no_stopwords.append(word)
         processed.append(s_no_stopwords)
     return processed
 
 
+# the function calculates the term frequency of the text
 def compute_term_frequency(processed_sentences, vocabulary):
-    partial_tf = defaultdict(int)
+    partial_tf = {word: 0 for word in vocabulary}
 
-    # Iterate through every word in every sentence
+    # iterating through every word in every sentence
     for sentence in processed_sentences:
         for word in sentence:
             if word in vocabulary:
@@ -67,6 +82,7 @@ def compute_term_frequency(processed_sentences, vocabulary):
     return dict(partial_tf)
 
 
+# MANAGER PATTERN 1
 def manager_pattern_1(args):
 
     all_sentences = load_text(args.text)
@@ -74,153 +90,172 @@ def manager_pattern_1(args):
     stopwords = load_words(args.stopwords)
 
     num_sentences = len(all_sentences)
-    num_workers = size - 1  # Ranks 1 to size-1
+    num_workers = size - 1  # total workers which are ranked 1 to size-1
 
-    if num_workers == 0:
-        return
-
-    # Calculate base size and remainder
+    # calculating base size and remainder
     base_size = num_sentences // num_workers
     remainder = num_sentences % num_workers
 
     chunks = []
     start_index = 0
+    # creating chunks for each worker
     for i in range(num_workers):
         chunk_size = base_size + (1 if i < remainder else 0)
         end_index = start_index + chunk_size
 
+        # separating the sentences for the chunks
         chunk = all_sentences[start_index:end_index]
         chunks.append(chunk)
         start_index = end_index
 
+    # sending sentences, vocab and stopwords data to the workers
     for worker_rank in range(1, size):
         data_to_send = {
-            'sentences': chunks[worker_rank - 1],
+            'sentences': chunks[worker_rank - 1],   # sending assigned sentences to the workers
             'vocabulary': vocabulary,
             'stopwords': stopwords
         }
+        # TAG 1: to identift the initial data message
         comm.send(data_to_send, dest=worker_rank, tag=1)
 
-    final_tf_results = defaultdict(int)
+    # creating a dictionary containing all vocab list
+    final_results = defaultdict(int)
 
+    # receiving the results of the term frequency from the workers
     for worker_rank in range(1, size):
+        # TAG 2: to identify the return message which contains partial result
         partial_tf = comm.recv(source=worker_rank, tag=2)
 
         for word, count in partial_tf.items():
-            final_tf_results[word] += count
+            final_results[word] += count    # incrementing the word counts at the result dict
 
-    sorted_results = sorted(final_tf_results.items())
+    # sorting the results and printing them
+    sorted_results = sorted(final_results.items())
     for word, count in sorted_results:
         print(f"{word}: {count}")
 
 
+# WORKER PATTERN 1
 def worker_pattern_1(args):
-
+    # receiving the data from the manager
     data_received = comm.recv(source=0, tag=1)
 
+    # unpack the data from manager
     sentences = data_received['sentences']
     vocabulary = data_received['vocabulary']
     stopwords = data_received['stopwords']
 
-    processed_data = lowercase_chunk(sentences)
-    processed_data = remove_punctuation_chunk(processed_data)
-    processed_data = remove_stopwords_chunk(processed_data, stopwords)
+    processed_data = lowercase_chunk(sentences)                 # lowercasing
+    processed_data = remove_punctuation_chunk(processed_data)   # punctuation removal
+    processed_data = remove_stopwords_chunk(processed_data, stopwords)  # stopwords removal
 
+    # partial result for the assigned chunk
     partial_tf = compute_term_frequency(processed_data, vocabulary)
-
+    # sending the partial result to the manager
     comm.send(partial_tf, dest=0, tag=2)
 
 
 
 
 
-
+# MANAGER PATTERN 2
 def manager_pattern_2(args):
     all_sentences = load_text(args.text)
-
     num_sentences = len(all_sentences)
+    chunk_div = 10  # can be adjusted between 5 and 20
 
-    CHUNK_DIVISOR = 10  # Can be adjusted between 5 and 20
-
-    if num_sentences // CHUNK_DIVISOR > 1:
-        chunk_size = num_sentences // CHUNK_DIVISOR
+    # calculating the chunk size
+    if num_sentences // chunk_div > 1:
+        chunk_size = num_sentences // chunk_div
     else:
         chunk_size = 1
 
-
+    # creating chunks for worker 1
     chunks = [all_sentences[i:i + chunk_size]
               for i in range(0, num_sentences, chunk_size)]
 
-    worker_1_rank = 1
-    TAG_DATA = 10
-    TAG_EOD = 11
-
+    # all chunks go to worker 1
     for i, chunk in enumerate(chunks):
-        comm.send(chunk, dest=worker_1_rank, tag=TAG_DATA)
+        # TAG 10: to send data chunks
+        comm.send(chunk, dest=1, tag=10)
 
-    comm.send(None, dest=worker_1_rank, tag=TAG_EOD)
+    # sending end-of-data signal to worker 1
+    # TAG 11: end-of-data signal
+    comm.send(None, dest=1, tag=11)
 
-    worker_4_rank = 4
-    TAG_RESULT = 12
+    # receiving the final result from worker 4
+    # TAG 12: for final result from the worker 4
+    final_results = comm.recv(source=4, tag=12)
 
-    final_tf_results = comm.recv(source=worker_4_rank, tag=TAG_RESULT)
-
-    sorted_results = sorted(final_tf_results.items())
+    sorted_results = sorted(final_results.items())
     for word, count in sorted_results:
         print(f"{word}: {count}")
 
 
+# WORKER PATTERN 2
 def worker_pattern_2(args):
     worker_rank = rank
 
+    PREV_RANK = rank - 1    # to determine source (manager or previous worker)
+    NEXT_RANK = rank + 1    # to determine destination worker (or manager for worker 4)
 
-    PREV_RANK = rank - 1
-    NEXT_RANK = rank + 1
-
-    TAG_DATA = 10
-    TAG_EOD = 11
-    TAG_RESULT = 12
-
+    # loading the only necessary data for each worker
+    # worker 3 needs stopwords
     if worker_rank == 3:
         stopwords = load_words(args.stopwords)
 
+    # worker 4 needs vocabulary
     elif worker_rank == 4:
         vocabulary = load_words(args.vocab)
 
+    # creating a result dictionary for worker 4
     if worker_rank == 4:
-        final_tf = defaultdict(int)
+        final_result = {word: 0 for word in vocabulary}
 
+    # main loop which receives the chunks, processes and sends to next node
     while True:
+        # determining the communication source
         source_rank = 0 if worker_rank == 1 else PREV_RANK
 
         status = MPI.Status()
         chunk = comm.recv(source=source_rank, tag=MPI.ANY_TAG, status=status)
 
-
-        if status.Get_tag() == TAG_EOD:
+        # check whether the signal is TAG 11 (end-of-data)
+        # if it is end, terminate the loop
+        if status.Get_tag() == 11:
             break
 
         processed_chunk = None
 
+        # worker 1 is specialized for lowercasing
         if worker_rank == 1:
             processed_chunk = lowercase_chunk(chunk)
+
+        # worker 2 is specialized for punctuation removal
         elif worker_rank == 2:
             processed_chunk = remove_punctuation_chunk(chunk)
+
+        # worker 3 is specialized for stopwords removal
         elif worker_rank == 3:
             processed_chunk = remove_stopwords_chunk(chunk, stopwords)
+
+        # worker 4 is specialized for calculating the final result
         elif worker_rank == 4:
             partial_tf = compute_term_frequency(chunk, vocabulary)
             for word, count in partial_tf.items():
-                final_tf[word] += count
+                final_result[word] += count
             continue
-
+        # forwarding the data to the next rank except for worker 4
         if worker_rank < 4:
-            comm.send(processed_chunk, dest=NEXT_RANK, tag=TAG_DATA)
+            comm.send(processed_chunk, dest=NEXT_RANK, tag=10)
 
+    # finalization after end-of-data signal is received
     if worker_rank < 4:
-        comm.send(None, dest=NEXT_RANK, tag=TAG_EOD)
+        # sending EOD signal to the next worker
+        comm.send(None, dest=NEXT_RANK, tag=11)
     elif worker_rank == 4:
-        comm.send(dict(final_tf), dest=0, tag=TAG_RESULT)
+        # sending final result to the manager
+        comm.send(dict(final_result), dest=0, tag=12)
 
 
 # Pattern 3 manager
